@@ -1,0 +1,925 @@
+//@version=5
+indicator('MTF Smart Money Trading System - Pro', 'MTF-SMC-PRO', overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500)
+
+// ═════════════════════════════════════════════════════════════════════════════
+// INPUTS - Your Trading Config
+// ═════════════════════════════════════════════════════════════════════════════
+
+// Timeframes
+htf1 = input.timeframe('240', 'HTF 1 (4H)', group='🕐 Timeframes')
+htf2 = input.timeframe('D', 'HTF 2 (Daily)', group='🕐 Timeframes')
+htf3 = input.timeframe('W', 'HTF 3 (Weekly)', group='🕐 Timeframes')
+
+// Structure Settings
+swingLength = input.int(25, 'External Structure Length', minval=10, maxval=50, group='📊 Structure', tooltip='Only major swings - ignore noise')
+entryTF = input.timeframe('60', 'Entry Timeframe', group='📊 Structure', tooltip='1H or 15min for sniper entries')
+showBOS = input.bool(true, 'Show BOS (Break of Structure)', group='📊 Structure')
+showCHOCH = input.bool(true, 'Show CHoCH (Change of Character)', group='📊 Structure')
+showEntry = input.bool(true, 'Show Entry Levels', group='📊 Structure')
+
+// Order Blocks
+showOB = input.bool(true, 'Show Order Blocks', group='📦 Order Blocks')
+maxOB = input.int(3, 'Max Order Blocks to Show', minval=1, maxval=10, group='📦 Order Blocks')
+obMitigation = input.string('High/Low', 'OB Mitigation Method', options=['Close', 'High/Low'], group='📦 Order Blocks')
+
+// Fair Value Gaps
+showFVG = input.bool(true, 'Show Fair Value Gaps', group='💎 FVG')
+fvgColor = input.color(color.new(color.yellow, 80), 'FVG Color', group='💎 FVG')
+
+// Display
+showHTF1 = input.bool(true, 'Show 4H Levels', group='🎨 Display', inline='htf1')
+htf1Color = input.color(color.new(color.blue, 30), '', group='🎨 Display', inline='htf1')
+showHTF2 = input.bool(true, 'Show Daily Levels', group='🎨 Display', inline='htf2')
+htf2Color = input.color(color.new(color.purple, 30), '', group='🎨 Display', inline='htf2')
+showHTF3 = input.bool(true, 'Show Weekly Levels', group='🎨 Display', inline='htf3')
+htf3Color = input.color(color.new(color.orange, 30), '', group='🎨 Display', inline='htf3')
+showZones = input.bool(true, 'Show Premium/Discount Zones', group='🎨 Display')
+
+// Risk/Reward Settings - SNIPER SETUPS
+rr1 = input.float(2.0, 'TP1 Risk:Reward (Sniper)', minval=1.0, step=0.5, group='🎯 Sniper Setups')
+rr2 = input.float(3.0, 'TP2 Risk:Reward (Sniper)', minval=1.5, step=0.5, group='🎯 Sniper Setups')
+rr3 = input.float(5.0, 'TP3 Risk:Reward (Sniper)', minval=2.0, step=0.5, group='🎯 Sniper Setups')
+showTP3 = input.bool(true, 'Show TP3 (Swing Target)', group='🎯 Sniper Setups')
+beLevel = input.float(1.0, 'Move to BE at R:R', minval=0.5, step=0.5, group='🎯 Sniper Setups', tooltip='When to move SL to break-even')
+
+// Quick Setups - Zone Reactions
+enableQuick = input.bool(true, 'Enable Quick Setups', group='⚡ Quick Setups', tooltip='Catch zone bounces with engulfing/rejection')
+quickRR1 = input.float(1.5, 'Quick TP1 R:R', minval=1.0, step=0.25, group='⚡ Quick Setups')
+quickRR2 = input.float(2.0, 'Quick TP2 R:R', minval=1.0, step=0.25, group='⚡ Quick Setups')
+minWickRatio = input.float(0.6, 'Min Rejection Wick Ratio', minval=0.3, maxval=0.9, step=0.1, group='⚡ Quick Setups', tooltip='Wick must be 60% of candle')
+requireEngulfing = input.bool(true, 'Require Engulfing', group='⚡ Quick Setups', tooltip='Stricter - only engulfing candles')
+quickRequireBoth = input.bool(false, 'Require Engulfing AND Liquidity Sweep', group='⚡ Quick Setups')
+quickUseOB = input.bool(true, 'Require In Matching OB', group='⚡ Quick Setups')
+quickUseFVG = input.bool(false, 'Require Imbalance (FVG) on Entry Bar', group='⚡ Quick Setups')
+quickMinBodyATR = input.float(0.6, 'Min Body as ATR multiple', minval=0.1, maxval=5.0, step=0.1, group='⚡ Quick Setups')
+quickBoundaryPct = input.float(0.15, 'Max Distance from Zone Boundary (% of HTF range)', minval=0.01, maxval=0.5, step=0.01, group='⚡ Quick Setups')
+quickCooldownBars = input.int(10, 'Cooldown Bars After Quick Trade', minval=0, maxval=500, group='⚡ Quick Setups')
+quickMaxPerDay = input.int(3, 'Max Quick Trades per Day', minval=1, maxval=20, group='⚡ Quick Setups')
+quickSession = input.session('0700-1700', 'Quick Session', group='⚡ Quick Setups')
+
+// Alerts
+showAlerts = input.bool(true, 'Show Entry Alerts', group='🔔 Alerts')
+trackWinRate = input.bool(true, 'Track Win Rate', group='🔔 Alerts', tooltip='Show historical win rate on this pair')
+
+// ═════════════════════════════════════════════════════════════════════════════
+// TYPES - Data Structures
+// ═════════════════════════════════════════════════════════════════════════════
+
+type OrderBlock
+    float top
+    float bottom
+    int startTime
+    bool isBullish
+    bool mitigated
+    box display
+
+type FVG
+    float top
+    float bottom
+    int startTime
+    bool isBullish
+    bool filled
+    box display
+
+type Structure
+    float level
+    int barTime
+    int barIndex
+    bool isBullish
+    bool crossed
+    string label
+
+type HTFData
+    float high
+    float low
+    float close
+    float open
+    int time
+    bool bullish
+
+type TradeSetup
+    float entry
+    float sl
+    float tp1
+    float tp2
+    float tp3
+    bool isBullish
+    int setupBar
+    string quality
+    float winProb
+    bool active
+    bool isQuick
+    string setupType
+    line entryLine
+    line slLine
+    line tp1Line
+    line tp2Line
+    line tp3Line
+    label setupLabel
+
+// ═════════════════════════════════════════════════════════════════════════════
+// CORE FUNCTIONS - The Real SMC Logic
+// ═════════════════════════════════════════════════════════════════════════════
+
+// Detect current market leg (bullish or bearish)
+getLeg(length) =>
+    var leg = 0
+    highBreak = high[length] > ta.highest(high, length)
+    lowBreak = low[length] < ta.lowest(low, length)
+    
+    if highBreak
+        leg := 0  // Bearish leg
+    else if lowBreak
+        leg := 1  // Bullish leg
+    leg
+
+// Get HTF data with proper structure
+getHTFData(tf) =>
+    [h, l, c, o, t] = request.security(syminfo.tickerid, tf, [high[1], low[1], close[1], open[1], time[1]], lookahead=barmerge.lookahead_on)
+    htfData = HTFData.new()
+    htfData.high := h
+    htfData.low := l
+    htfData.close := c
+    htfData.open := o
+    htfData.time := t
+    htfData.bullish := c > o
+    htfData
+
+// Detect Fair Value Gap (3-candle imbalance)
+detectFVG() =>
+    var array<FVG> fvgArray = array.new<FVG>()
+    
+    // Bullish FVG: Current low > 2 candles ago high
+    bullishFVG = low > high[2] and close > high[2] and close[1] > high[2]
+    
+    // Bearish FVG: Current high < 2 candles ago low
+    bearishFVG = high < low[2] and close < low[2] and close[1] < low[2]
+    
+    if bullishFVG and showFVG
+        fvg = FVG.new()
+        fvg.top := low
+        fvg.bottom := high[2]
+        fvg.startTime := time[1]
+        fvg.isBullish := true
+        fvg.filled := false
+        fvg.display := box.new(time[1], low, time, high[2], xloc=xloc.bar_time, bgcolor=color.new(color.green, 85), border_color=color.new(color.green, 60))
+        fvgArray.push(fvg)
+    
+    if bearishFVG and showFVG
+        fvg = FVG.new()
+        fvg.top := low[2]
+        fvg.bottom := high
+        fvg.startTime := time[1]
+        fvg.isBullish := false
+        fvg.filled := false
+        fvg.display := box.new(time[1], low[2], time, high, xloc=xloc.bar_time, bgcolor=color.new(color.red, 85), border_color=color.new(color.red, 60))
+        fvgArray.push(fvg)
+    
+    fvgArray
+
+// Detect Order Block (the candle that caused the move)
+findOrderBlock(pivotBar, isBullish) =>
+    ob = OrderBlock.new(na, na, na, isBullish, false, na)
+    
+    if isBullish
+        // Find last bearish candle before the swing low (institution sell that created the low)
+        for i = pivotBar to pivotBar + 10
+            if i < bar_index and close[i] < open[i]
+                ob.top := high[i]
+                ob.bottom := low[i]
+                ob.startTime := time[i]
+                ob.mitigated := false
+                break
+    else
+        // Find last bullish candle before the swing high (institution buy that created the high)
+        for i = pivotBar to pivotBar + 10
+            if i < bar_index and close[i] > open[i]
+                ob.top := high[i]
+                ob.bottom := low[i]
+                ob.startTime := time[i]
+                ob.mitigated := false
+                break
+    ob
+
+// Check if price is in discount, premium, or equilibrium
+getZone(currentPrice, rangeHigh, rangeLow) =>
+    priceRange = rangeHigh - rangeLow
+    if currentPrice < rangeLow + (priceRange * 0.382)
+        'DISCOUNT'
+    else if currentPrice > rangeHigh - (priceRange * 0.382)
+        'PREMIUM'
+    else
+        'EQUILIBRIUM'
+
+// Simple alert helper
+alertZone(zone) =>
+    if showAlerts
+        if zone == 'DISCOUNT' and zone[1] != 'DISCOUNT'
+            true
+        else if zone == 'PREMIUM' and zone[1] != 'PREMIUM'
+            true
+        else
+            false
+    else
+        false
+
+// ═════════════════════════════════════════════════════════════════════════════
+// VARIABLES & STATE
+// ═════════════════════════════════════════════════════════════════════════════
+
+// Structure tracking
+var Structure swingHigh = Structure.new(na, na, na, false, false, '')
+var Structure swingLow = Structure.new(na, na, na, true, false, '')
+var int trend = 0  // 1 = bullish, -1 = bearish, 0 = neutral
+
+// Order Blocks storage
+var array<OrderBlock> bullishOBs = array.new<OrderBlock>()
+var array<OrderBlock> bearishOBs = array.new<OrderBlock>()
+
+// Trade tracking and win rate
+var int totalSetups = 0
+var int wonSetups = 0
+var float winRate = 0.0
+var TradeSetup currentSetup = na
+var bool setupTriggered = false
+
+// Quick setup tracking
+var TradeSetup currentQuickSetup = na
+
+// Quick setup risk controls
+var int lastQuickBar = na
+var int lastDay = na
+var int quickCountToday = 0
+
+// ═════════════════════════════════════════════════════════════════════════════
+// CANDLE PATTERN DETECTION - For Quick Setups
+// ═════════════════════════════════════════════════════════════════════════════
+
+// Detect Bullish Engulfing
+isBullishEngulfing() =>
+    bodySize = close - open
+    prevBodySize = close[1] - open[1]
+    close > open and close[1] < open[1] and close > open[1] and open < close[1] and bodySize > math.abs(prevBodySize)
+
+// Detect Bearish Engulfing
+isBearishEngulfing() =>
+    bodySize = open - close
+    prevBodySize = open[1] - close[1]
+    close < open and close[1] > open[1] and close < open[1] and open > close[1] and bodySize > math.abs(prevBodySize)
+
+// Detect Bullish Rejection (Hammer/Pin Bar)
+isBullishRejection(wickRatio) =>
+    bodySize = math.abs(close - open)
+    lowerWick = (close > open ? open : close) - low
+    totalRange = high - low
+    totalRange > 0 and lowerWick / totalRange >= wickRatio and close > open and bodySize < totalRange * 0.4
+
+// Detect Bearish Rejection (Shooting Star)
+isBearishRejection(wickRatio) =>
+    bodySize = math.abs(close - open)
+    upperWick = high - (close > open ? close : open)
+    totalRange = high - low
+    totalRange > 0 and upperWick / totalRange >= wickRatio and close < open and bodySize < totalRange * 0.4
+
+// Liquidity Sweep Detection (price went below/above recent low/high then reversed)
+isBullishLiquiditySweep() =>
+    // Swept below recent low and closed back up
+    low < ta.lowest(low[1], 5) and close > open and close > low + (high - low) * 0.6
+
+isBearishLiquiditySweep() =>
+    // Swept above recent high and closed back down
+    high > ta.highest(high[1], 5) and close < open and close < high - (high - low) * 0.6
+
+// Color scheme
+bullColor = color.new(color.green, 0)
+bearColor = color.new(color.red, 0)
+bullColorTrans = color.new(color.green, 80)
+bearColorTrans = color.new(color.red, 80)
+
+// ═════════════════════════════════════════════════════════════════════════════
+// MAIN LOGIC - Structure Detection
+// ═════════════════════════════════════════════════════════════════════════════
+
+// Get HTF data
+htf1Data = getHTFData(htf1)
+htf2Data = getHTFData(htf2)
+htf3Data = getHTFData(htf3)
+
+// HTF Bias (all HTFs must align for high-probability setup)
+htfBullish = htf1Data.bullish and htf2Data.bullish and htf3Data.bullish
+htfBearish = not htf1Data.bullish and not htf2Data.bullish and not htf3Data.bullish
+htfMixed = not htfBullish and not htfBearish
+
+// Detect swing structure
+currentLeg = getLeg(swingLength)
+legChanged = ta.change(currentLeg)
+
+// Update swing points
+if legChanged != 0
+    if legChanged == -1  // New bearish leg = we have a swing high
+        swingHigh.level := high[swingLength]
+        swingHigh.barTime := time[swingLength]
+        swingHigh.barIndex := bar_index[swingLength]
+        swingHigh.crossed := false
+        swingHigh.label := swingHigh.level > swingHigh.level[1] ? 'HH' : 'LH'
+        
+        // Create bearish order block
+        if showOB
+            ob = findOrderBlock(swingLength, false)
+            if not na(ob.top)
+                bearishOBs.push(ob)
+                if bearishOBs.size() > maxOB
+                    oldOB = bearishOBs.shift()
+                    if not na(oldOB.display)
+                        box.delete(oldOB.display)
+    
+    else if legChanged == 1  // New bullish leg = we have a swing low
+        swingLow.level := low[swingLength]
+        swingLow.barTime := time[swingLength]
+        swingLow.barIndex := bar_index[swingLength]
+        swingLow.crossed := false
+        swingLow.label := swingLow.level < swingLow.level[1] ? 'LL' : 'HL'
+        
+        // Create bullish order block
+        if showOB
+            ob = findOrderBlock(swingLength, true)
+            if not na(ob.top)
+                bullishOBs.push(ob)
+                if bullishOBs.size() > maxOB
+                    oldOB = bullishOBs.shift()
+                    if not na(oldOB.display)
+                        box.delete(oldOB.display)
+
+// Detect BOS and CHoCH
+var label lastStructureLabel = na
+
+// Bullish Break
+if ta.crossover(close, swingHigh.level) and not swingHigh.crossed
+    swingHigh.crossed := true
+    
+    structureType = trend == -1 ? 'CHoCH' : 'BOS'
+    
+    if (structureType == 'BOS' and showBOS) or (structureType == 'CHoCH' and showCHOCH)
+        label.delete(lastStructureLabel)
+        lastStructureLabel := label.new(bar_index, swingHigh.level, structureType, 
+             style=label.style_label_down, color=bullColor, textcolor=color.white, size=size.small)
+        line.new(swingHigh.barIndex, swingHigh.level, bar_index, swingHigh.level, 
+             color=bullColor, style=line.style_dashed, xloc=xloc.bar_index)
+    
+    trend := 1  // Now bullish
+
+// Bearish Break
+if ta.crossunder(close, swingLow.level) and not swingLow.crossed
+    swingLow.crossed := true
+    
+    structureType = trend == 1 ? 'CHoCH' : 'BOS'
+    
+    if (structureType == 'BOS' and showBOS) or (structureType == 'CHoCH' and showCHOCH)
+        label.delete(lastStructureLabel)
+        lastStructureLabel := label.new(bar_index, swingLow.level, structureType, 
+             style=label.style_label_up, color=bearColor, textcolor=color.white, size=size.small)
+        line.new(swingLow.barIndex, swingLow.level, bar_index, swingLow.level, 
+             color=bearColor, style=line.style_dashed, xloc=xloc.bar_index)
+    
+    trend := -1  // Now bearish
+
+// Calculate HTF range and current zone
+highestHTF = math.max(htf1Data.high, htf2Data.high, htf3Data.high)
+lowestHTF = math.min(htf1Data.low, htf2Data.low, htf3Data.low)
+currentZone = getZone(close, highestHTF, lowestHTF)
+
+// FVG Detection
+fvgArray = detectFVG()
+
+// ═════════════════════════════════════════════════════════════════════════════
+// DISPLAY HTF LEVELS
+// ═════════════════════════════════════════════════════════════════════════════
+
+var line htf1HighLine = na
+var line htf1LowLine = na
+var label htf1HighLabel = na
+var label htf1LowLabel = na
+
+var line htf2HighLine = na
+var line htf2LowLine = na
+var label htf2HighLabel = na
+var label htf2LowLabel = na
+
+var line htf3HighLine = na
+var line htf3LowLine = na
+var label htf3HighLabel = na
+var label htf3LowLabel = na
+
+if barstate.islast
+    // HTF1 (4H) Levels
+    if showHTF1
+        line.delete(htf1HighLine)
+        line.delete(htf1LowLine)
+        label.delete(htf1HighLabel)
+        label.delete(htf1LowLabel)
+        
+        htf1HighLine := line.new(htf1Data.time, htf1Data.high, time, htf1Data.high, xloc=xloc.bar_time, color=htf1Color, width=2, style=line.style_solid)
+        htf1LowLine := line.new(htf1Data.time, htf1Data.low, time, htf1Data.low, xloc=xloc.bar_time, color=htf1Color, width=2, style=line.style_solid)
+        htf1HighLabel := label.new(time, htf1Data.high, '4H HIGH', xloc=xloc.bar_time, style=label.style_label_left, color=htf1Color, textcolor=color.white, size=size.small)
+        htf1LowLabel := label.new(time, htf1Data.low, '4H LOW', xloc=xloc.bar_time, style=label.style_label_left, color=htf1Color, textcolor=color.white, size=size.small)
+    
+    // HTF2 (Daily) Levels
+    if showHTF2
+        line.delete(htf2HighLine)
+        line.delete(htf2LowLine)
+        label.delete(htf2HighLabel)
+        label.delete(htf2LowLabel)
+        
+        htf2HighLine := line.new(htf2Data.time, htf2Data.high, time, htf2Data.high, xloc=xloc.bar_time, color=htf2Color, width=2, style=line.style_dashed)
+        htf2LowLine := line.new(htf2Data.time, htf2Data.low, time, htf2Data.low, xloc=xloc.bar_time, color=htf2Color, width=2, style=line.style_dashed)
+        htf2HighLabel := label.new(time, htf2Data.high, 'DAILY HIGH', xloc=xloc.bar_time, style=label.style_label_left, color=htf2Color, textcolor=color.white, size=size.small)
+        htf2LowLabel := label.new(time, htf2Data.low, 'DAILY LOW', xloc=xloc.bar_time, style=label.style_label_left, color=htf2Color, textcolor=color.white, size=size.small)
+    
+    // HTF3 (Weekly) Levels
+    if showHTF3
+        line.delete(htf3HighLine)
+        line.delete(htf3LowLine)
+        label.delete(htf3HighLabel)
+        label.delete(htf3LowLabel)
+        
+        htf3HighLine := line.new(htf3Data.time, htf3Data.high, time, htf3Data.high, xloc=xloc.bar_time, color=htf3Color, width=3, style=line.style_dotted)
+        htf3LowLine := line.new(htf3Data.time, htf3Data.low, time, htf3Data.low, xloc=xloc.bar_time, color=htf3Color, width=3, style=line.style_dotted)
+        htf3HighLabel := label.new(time, htf3Data.high, 'WEEKLY HIGH', xloc=xloc.bar_time, style=label.style_label_left, color=htf3Color, textcolor=color.white, size=size.normal)
+        htf3LowLabel := label.new(time, htf3Data.low, 'WEEKLY LOW', xloc=xloc.bar_time, style=label.style_label_left, color=htf3Color, textcolor=color.white, size=size.normal)
+
+// ═════════════════════════════════════════════════════════════════════════════
+// DISPLAY ORDER BLOCKS
+// ═════════════════════════════════════════════════════════════════════════════
+
+// Draw and manage bullish order blocks
+if showOB and barstate.islast
+    for [i, ob] in bullishOBs
+        if not na(ob.top)
+            mitigationSource = obMitigation == 'Close' ? close : low
+            
+            // Check if mitigated
+            if mitigationSource < ob.bottom
+                ob.mitigated := true
+                if not na(ob.display)
+                    box.delete(ob.display)
+            else
+                // Draw or update box
+                if na(ob.display)
+                    ob.display := box.new(ob.startTime, ob.top, time, ob.bottom, 
+                         xloc=xloc.bar_time, bgcolor=bullColorTrans, border_color=bullColor, border_width=1)
+                else
+                    box.set_right(ob.display, time)
+
+// Draw and manage bearish order blocks
+if showOB and barstate.islast
+    for [i, ob] in bearishOBs
+        if not na(ob.top)
+            mitigationSource = obMitigation == 'Close' ? close : high
+            
+            // Check if mitigated
+            if mitigationSource > ob.top
+                ob.mitigated := true
+                if not na(ob.display)
+                    box.delete(ob.display)
+            else
+                // Draw or update box
+                if na(ob.display)
+                    ob.display := box.new(ob.startTime, ob.top, time, ob.bottom, 
+                         xloc=xloc.bar_time, bgcolor=bearColorTrans, border_color=bearColor, border_width=1)
+                else
+                    box.set_right(ob.display, time)
+
+// ═════════════════════════════════════════════════════════════════════════════
+// PREMIUM/DISCOUNT ZONES
+// ═════════════════════════════════════════════════════════════════════════════
+
+var box premiumBox = na
+var box discountBox = na
+var box eqBox = na
+var label premiumLabel = na
+var label discountLabel = na
+
+if showZones and barstate.islast
+    box.delete(premiumBox)
+    box.delete(discountBox)
+    box.delete(eqBox)
+    label.delete(premiumLabel)
+    label.delete(discountLabel)
+    
+    priceRange = highestHTF - lowestHTF
+    
+    // Premium zone: 61.8% - 100%
+    premium_top = highestHTF
+    premium_bottom = highestHTF - (priceRange * 0.382)
+    
+    // Discount zone: 0% - 38.2%
+    discount_top = lowestHTF + (priceRange * 0.382)
+    discount_bottom = lowestHTF
+    
+    // Equilibrium: 38.2% - 61.8%
+    eq_top = premium_bottom
+    eq_bottom = discount_top
+    
+    premiumBox := box.new(time - 50*timeframe.multiplier*60000, premium_top, time, premium_bottom, xloc=xloc.bar_time, border_color=color.new(color.red, 85), bgcolor=color.new(color.red, 92), border_width=1)
+    discountBox := box.new(time - 50*timeframe.multiplier*60000, discount_top, time, discount_bottom, xloc=xloc.bar_time, border_color=color.new(color.green, 85), bgcolor=color.new(color.green, 92), border_width=1)
+    eqBox := box.new(time - 50*timeframe.multiplier*60000, eq_top, time, eq_bottom, xloc=xloc.bar_time, border_color=color.new(color.gray, 93), bgcolor=color.new(color.gray, 96), border_width=1)
+    
+    premiumLabel := label.new(time, premium_top, 'PREMIUM (SELL ZONE)', xloc=xloc.bar_time, style=label.style_label_down, color=color.new(color.red, 20), textcolor=color.white, size=size.tiny)
+    discountLabel := label.new(time, discount_bottom, 'DISCOUNT (BUY ZONE)', xloc=xloc.bar_time, style=label.style_label_up, color=color.new(color.green, 20), textcolor=color.white, size=size.tiny)
+
+// ═════════════════════════════════════════════════════════════════════════════
+// ZONE & STRUCTURE STATUS
+// ═════════════════════════════════════════════════════════════════════════════
+
+// Check if we're in an order block
+inBullishOB = false
+inBearishOB = false
+
+if bullishOBs.size() > 0
+    for ob in bullishOBs
+        if not ob.mitigated and close >= ob.bottom and close <= ob.top
+            inBullishOB := true
+
+if bearishOBs.size() > 0
+    for ob in bearishOBs
+        if not ob.mitigated and close >= ob.bottom and close <= ob.top
+            inBearishOB := true
+
+// Setup quality (for dashboard)
+setupQuality = (currentZone == 'DISCOUNT' and htfBullish and trend == 1) or (currentZone == 'PREMIUM' and htfBearish and trend == -1) ? 'HIGH' : (currentZone != 'EQUILIBRIUM' and (htfBullish or htfBearish)) ? 'MEDIUM' : 'LOW'
+
+// Win probability based on conditions met
+conditionsMet = 0
+if currentZone == 'DISCOUNT' or currentZone == 'PREMIUM'
+    conditionsMet += 1
+if htfBullish or htfBearish
+    conditionsMet += 1
+if trend == 1 or trend == -1
+    conditionsMet += 1
+if inBullishOB or inBearishOB
+    conditionsMet += 1
+
+winProbability = trackWinRate and totalSetups > 10 ? winRate : conditionsMet == 4 ? 75.0 : conditionsMet == 3 ? 65.0 : conditionsMet == 2 ? 50.0 : 35.0
+
+// ═════════════════════════════════════════════════════════════════════════════
+// ENTRY SIGNAL GENERATION - Sniper Entries
+// ═════════════════════════════════════════════════════════════════════════════
+
+// Detect HIGH quality setup
+buySetupConfirmed = currentZone == 'DISCOUNT' and htfBullish and trend == 1 and inBullishOB
+sellSetupConfirmed = currentZone == 'PREMIUM' and htfBearish and trend == -1 and inBearishOB
+
+// Reset trigger at start of bar
+setupTriggered := false
+
+// Generate entry signal
+if buySetupConfirmed and showEntry and na(currentSetup)
+    // Calculate levels
+    entryPrice = close
+    slPrice = swingLow.level * 0.998
+    riskPips = entryPrice - slPrice
+    
+    tp1Price = entryPrice + (riskPips * rr1)
+    tp2Price = entryPrice + (riskPips * rr2)
+    tp3Price = showTP3 ? entryPrice + (riskPips * rr3) : na
+    
+    // Create setup
+    currentSetup := TradeSetup.new()
+    currentSetup.entry := entryPrice
+    currentSetup.sl := slPrice
+    currentSetup.tp1 := tp1Price
+    currentSetup.tp2 := tp2Price
+    currentSetup.tp3 := tp3Price
+    currentSetup.isBullish := true
+    currentSetup.setupBar := bar_index
+    currentSetup.quality := setupQuality
+    currentSetup.winProb := winProbability
+    currentSetup.active := true
+    currentSetup.isQuick := false
+    currentSetup.setupType := '🎯 SNIPER'
+    
+    // Draw lines
+    currentSetup.entryLine := line.new(bar_index, entryPrice, bar_index + 50, entryPrice, xloc=xloc.bar_index, color=color.white, width=2, style=line.style_solid)
+    currentSetup.slLine := line.new(bar_index, slPrice, bar_index + 50, slPrice, xloc=xloc.bar_index, color=bearColor, width=2, style=line.style_dashed)
+    currentSetup.tp1Line := line.new(bar_index, tp1Price, bar_index + 50, tp1Price, xloc=xloc.bar_index, color=bullColor, width=1, style=line.style_dashed)
+    currentSetup.tp2Line := line.new(bar_index, tp2Price, bar_index + 50, tp2Price, xloc=xloc.bar_index, color=bullColor, width=2, style=line.style_dashed)
+    if showTP3 and not na(tp3Price)
+        currentSetup.tp3Line := line.new(bar_index, tp3Price, bar_index + 50, tp3Price, xloc=xloc.bar_index, color=bullColor, width=3, style=line.style_solid)
+    
+    // Draw label
+    labelText = '🚀 BUY ENTRY\n━━━━━━━━━━\n' + '📍 Entry: ' + str.tostring(entryPrice, '#.##') + '\n' + '❌ SL: ' + str.tostring(slPrice, '#.##') + '\n' + '✅ TP1: ' + str.tostring(tp1Price, '#.##') + ' (1:' + str.tostring(rr1, '#.#') + ')\n' + '✅ TP2: ' + str.tostring(tp2Price, '#.##') + ' (1:' + str.tostring(rr2, '#.#') + ')\n' + (showTP3 ? '🎯 TP3: ' + str.tostring(tp3Price, '#.##') + ' (1:' + str.tostring(rr3, '#.#') + ')\n' : '') + '📊 Win Prob: ' + str.tostring(winProbability, '#.#') + '%\n' + '⚡ Quality: ' + setupQuality
+    currentSetup.setupLabel := label.new(bar_index, low, labelText, style=label.style_label_up, color=bullColor, textcolor=color.white, size=size.normal)
+    
+    totalSetups += 1
+    setupTriggered := true
+
+if sellSetupConfirmed and showEntry and na(currentSetup)
+    // Calculate levels
+    entryPrice = close
+    slPrice = swingHigh.level * 1.002
+    riskPips = slPrice - entryPrice
+    
+    tp1Price = entryPrice - (riskPips * rr1)
+    tp2Price = entryPrice - (riskPips * rr2)
+    tp3Price = showTP3 ? entryPrice - (riskPips * rr3) : na
+    
+    // Create setup
+    currentSetup := TradeSetup.new()
+    currentSetup.entry := entryPrice
+    currentSetup.sl := slPrice
+    currentSetup.tp1 := tp1Price
+    currentSetup.tp2 := tp2Price
+    currentSetup.tp3 := tp3Price
+    currentSetup.isBullish := false
+    currentSetup.setupBar := bar_index
+    currentSetup.quality := setupQuality
+    currentSetup.winProb := winProbability
+    currentSetup.active := true
+    currentSetup.isQuick := false
+    currentSetup.setupType := '🎯 SNIPER'
+    
+    // Draw lines
+    currentSetup.entryLine := line.new(bar_index, entryPrice, bar_index + 50, entryPrice, xloc=xloc.bar_index, color=color.white, width=2, style=line.style_solid)
+    currentSetup.slLine := line.new(bar_index, slPrice, bar_index + 50, slPrice, xloc=xloc.bar_index, color=bearColor, width=2, style=line.style_dashed)
+    currentSetup.tp1Line := line.new(bar_index, tp1Price, bar_index + 50, tp1Price, xloc=xloc.bar_index, color=bullColor, width=1, style=line.style_dashed)
+    currentSetup.tp2Line := line.new(bar_index, tp2Price, bar_index + 50, tp2Price, xloc=xloc.bar_index, color=bullColor, width=2, style=line.style_dashed)
+    if showTP3 and not na(tp3Price)
+        currentSetup.tp3Line := line.new(bar_index, tp3Price, bar_index + 50, tp3Price, xloc=xloc.bar_index, color=bullColor, width=3, style=line.style_solid)
+    
+    // Draw label
+    labelText = '🔻 SELL ENTRY\n━━━━━━━━━━\n' + '📍 Entry: ' + str.tostring(entryPrice, '#.##') + '\n' + '❌ SL: ' + str.tostring(slPrice, '#.##') + '\n' + '✅ TP1: ' + str.tostring(tp1Price, '#.##') + ' (1:' + str.tostring(rr1, '#.#') + ')\n' + '✅ TP2: ' + str.tostring(tp2Price, '#.##') + ' (1:' + str.tostring(rr2, '#.#') + ')\n' + (showTP3 ? '🎯 TP3: ' + str.tostring(tp3Price, '#.##') + ' (1:' + str.tostring(rr3, '#.#') + ')\n' : '') + '📊 Win Prob: ' + str.tostring(winProbability, '#.#') + '%\n' + '⚡ Quality: ' + setupQuality
+    currentSetup.setupLabel := label.new(bar_index, high, labelText, style=label.style_label_down, color=bearColor, textcolor=color.white, size=size.normal)
+    
+    totalSetups += 1
+    setupTriggered := true
+
+// ═════════════════════════════════════════════════════════════════════════════
+// QUICK SETUPS - Zone Reaction Entries
+// ═════════════════════════════════════════════════════════════════════════════
+
+// Daily counter reset for quick setups
+if na(lastDay) or dayofmonth != lastDay
+    quickCountToday := 0
+    lastDay := dayofmonth
+
+// Helper filters and gating
+inQuickSession = not na(time(timeframe.period, quickSession))
+atr14 = ta.atr(14)
+bodySize = math.abs(close - open)
+bodyOK = atr14 > 0 ? bodySize >= quickMinBodyATR * atr14 : true
+priceRange_q = highestHTF - lowestHTF
+premium_bottom_q = highestHTF - (priceRange_q * 0.382)
+discount_top_q = lowestHTF + (priceRange_q * 0.382)
+// Boundary proximity (normalized to HTF range)
+boundaryDistBuy = priceRange_q > 0 ? (discount_top_q - close) / priceRange_q : 0.0
+boundaryOKBuy = boundaryDistBuy >= 0 and boundaryDistBuy <= quickBoundaryPct
+boundaryDistSell = priceRange_q > 0 ? (close - premium_bottom_q) / priceRange_q : 0.0
+boundaryOKSell = boundaryDistSell >= 0 and boundaryDistSell <= quickBoundaryPct
+// Imbalance on current bar
+bullishFVGNow = low > high[2] and close > high[2] and close[1] > high[2]
+bearishFVGNow = high < low[2] and close < low[2] and close[1] < low[2]
+// Cooldown and daily cap
+okCooldown = na(lastQuickBar) or bar_index - lastQuickBar >= quickCooldownBars
+okDaily = quickCountToday < quickMaxPerDay
+
+// Check for Quick Buy Setup
+quickBuySetup = false
+preBuyGate = enableQuick and na(currentSetup) and currentZone == 'DISCOUNT' and trend == 1 and inQuickSession and okCooldown and okDaily
+if preBuyGate
+    hasEngulfing = isBullishEngulfing()
+    hasRejection = isBullishRejection(minWickRatio)
+    hasLiqSweep = isBullishLiquiditySweep()
+    
+    // Base confirmation
+    baseSignal = (requireEngulfing and hasEngulfing) or (not requireEngulfing and (hasEngulfing or (hasRejection and hasLiqSweep)))
+    if quickRequireBoth
+        baseSignal := hasEngulfing and hasLiqSweep
+    
+    // Final quick buy condition with filters
+    quickBuySetup := baseSignal and bodyOK and boundaryOKBuy and (not quickUseOB or inBullishOB) and (not quickUseFVG or bullishFVGNow)
+
+if quickBuySetup
+    entryPrice = close
+    slPrice = low - (high - low) * 0.2
+    riskPips = entryPrice - slPrice
+    
+    tp1Price = entryPrice + (riskPips * quickRR1)
+    tp2Price = entryPrice + (riskPips * quickRR2)
+    
+    // Create quick setup
+    currentSetup := TradeSetup.new()
+    currentSetup.entry := entryPrice
+    currentSetup.sl := slPrice
+    currentSetup.tp1 := tp1Price
+    currentSetup.tp2 := tp2Price
+    currentSetup.tp3 := na
+    currentSetup.isBullish := true
+    currentSetup.setupBar := bar_index
+    currentSetup.quality := '⚡ QUICK'
+    currentSetup.winProb := 55.0
+    currentSetup.active := true
+    currentSetup.isQuick := true
+    currentSetup.setupType := '⚡ QUICK'
+    
+    // Draw lines (yellow/orange for quick)
+    quickColor = color.new(color.yellow, 0)
+    currentSetup.entryLine := line.new(bar_index, entryPrice, bar_index + 30, entryPrice, xloc=xloc.bar_index, color=quickColor, width=2, style=line.style_solid)
+    currentSetup.slLine := line.new(bar_index, slPrice, bar_index + 30, slPrice, xloc=xloc.bar_index, color=bearColor, width=2, style=line.style_dashed)
+    currentSetup.tp1Line := line.new(bar_index, tp1Price, bar_index + 30, tp1Price, xloc=xloc.bar_index, color=bullColor, width=1, style=line.style_dashed)
+    currentSetup.tp2Line := line.new(bar_index, tp2Price, bar_index + 30, tp2Price, xloc=xloc.bar_index, color=bullColor, width=2, style=line.style_dashed)
+    currentSetup.tp3Line := na
+    
+    // Draw label
+    labelText = '⚡ QUICK BUY\n━━━━━━━━━━\n' + '📍 Entry: ' + str.tostring(entryPrice, '#.##') + '\n' + '❌ SL: ' + str.tostring(slPrice, '#.##') + '\n' + '✅ TP1: ' + str.tostring(tp1Price, '#.##') + ' (1:' + str.tostring(quickRR1, '#.#') + ')\n' + '✅ TP2: ' + str.tostring(tp2Price, '#.##') + ' (1:' + str.tostring(quickRR2, '#.#') + ')\n' + '⚡ Zone Reaction'
+    currentSetup.setupLabel := label.new(bar_index, low, labelText, style=label.style_label_up, color=quickColor, textcolor=color.black, size=size.normal)
+    
+    totalSetups += 1
+    setupTriggered := true
+    // Cooldown and daily tracking
+    quickCountToday += 1
+    lastQuickBar := bar_index
+
+// Check for Quick Sell Setup
+quickSellSetup = false
+preSellGate = enableQuick and na(currentSetup) and currentZone == 'PREMIUM' and trend == -1 and inQuickSession and okCooldown and okDaily
+if preSellGate
+    hasEngulfing = isBearishEngulfing()
+    hasRejection = isBearishRejection(minWickRatio)
+    hasLiqSweep = isBearishLiquiditySweep()
+    
+    // Base confirmation
+    baseSignalS = (requireEngulfing and hasEngulfing) or (not requireEngulfing and (hasEngulfing or (hasRejection and hasLiqSweep)))
+    if quickRequireBoth
+        baseSignalS := hasEngulfing and hasLiqSweep
+    
+    // Final quick sell condition with filters
+    quickSellSetup := baseSignalS and bodyOK and boundaryOKSell and (not quickUseOB or inBearishOB) and (not quickUseFVG or bearishFVGNow)
+
+if quickSellSetup
+    entryPrice = close
+    slPrice = high + (high - low) * 0.2
+    riskPips = slPrice - entryPrice
+    
+    tp1Price = entryPrice - (riskPips * quickRR1)
+    tp2Price = entryPrice - (riskPips * quickRR2)
+    
+    // Create quick setup
+    currentSetup := TradeSetup.new()
+    currentSetup.entry := entryPrice
+    currentSetup.sl := slPrice
+    currentSetup.tp1 := tp1Price
+    currentSetup.tp2 := tp2Price
+    currentSetup.tp3 := na
+    currentSetup.isBullish := false
+    currentSetup.setupBar := bar_index
+    currentSetup.quality := '⚡ QUICK'
+    currentSetup.winProb := 55.0
+    currentSetup.active := true
+    currentSetup.isQuick := true
+    currentSetup.setupType := '⚡ QUICK'
+    
+    // Draw lines (yellow/orange for quick)
+    quickColor = color.new(color.yellow, 0)
+    currentSetup.entryLine := line.new(bar_index, entryPrice, bar_index + 30, entryPrice, xloc=xloc.bar_index, color=quickColor, width=2, style=line.style_solid)
+    currentSetup.slLine := line.new(bar_index, slPrice, bar_index + 30, slPrice, xloc=xloc.bar_index, color=bearColor, width=2, style=line.style_dashed)
+    currentSetup.tp1Line := line.new(bar_index, tp1Price, bar_index + 30, tp1Price, xloc=xloc.bar_index, color=bullColor, width=1, style=line.style_dashed)
+    currentSetup.tp2Line := line.new(bar_index, tp2Price, bar_index + 30, tp2Price, xloc=xloc.bar_index, color=bullColor, width=2, style=line.style_dashed)
+    currentSetup.tp3Line := na
+    
+    // Draw label
+    labelText = '⚡ QUICK SELL\n━━━━━━━━━━\n' + '📍 Entry: ' + str.tostring(entryPrice, '#.##') + '\n' + '❌ SL: ' + str.tostring(slPrice, '#.##') + '\n' + '✅ TP1: ' + str.tostring(tp1Price, '#.##') + ' (1:' + str.tostring(quickRR1, '#.#') + ')\n' + '✅ TP2: ' + str.tostring(tp2Price, '#.##') + ' (1:' + str.tostring(quickRR2, '#.#') + ')\n' + '⚡ Zone Reaction'
+    currentSetup.setupLabel := label.new(bar_index, high, labelText, style=label.style_label_down, color=quickColor, textcolor=color.black, size=size.normal)
+    
+    totalSetups += 1
+    setupTriggered := true
+    // Cooldown and daily tracking
+    quickCountToday += 1
+    lastQuickBar := bar_index
+
+// Track current setup for BE and win/loss
+moveToBE = false
+tradeCompleted = false
+
+if not na(currentSetup)
+    if currentSetup.active
+        if currentSetup.isBullish
+            // Check if TP2 hit (full win) or SL hit (loss) - close trade
+            if high >= currentSetup.tp2 or low <= currentSetup.sl
+                if high >= currentSetup.tp2
+                    wonSetups += 1
+                currentSetup.active := false
+                tradeCompleted := true
+                winRate := (wonSetups / totalSetups) * 100
+            // Check if TP1 hit (partial win) - keep active but count as win
+            else if high >= currentSetup.tp1 and not currentSetup.isQuick
+                wonSetups += 1
+                // Keep active for TP2
+            // Check if should move to BE
+            else
+                riskPips = currentSetup.entry - currentSetup.sl
+                if high >= currentSetup.entry + (riskPips * beLevel)
+                    moveToBE := true
+        else
+            // Check if TP2 hit (full win) or SL hit (loss) - close trade
+            if low <= currentSetup.tp2 or high >= currentSetup.sl
+                if low <= currentSetup.tp2
+                    wonSetups += 1
+                currentSetup.active := false
+                tradeCompleted := true
+                winRate := (wonSetups / totalSetups) * 100
+            // Check if TP1 hit (partial win) - keep active but count as win
+            else if low <= currentSetup.tp1 and not currentSetup.isQuick
+                wonSetups += 1
+                // Keep active for TP2
+            // Check if should move to BE
+            else
+                riskPips = currentSetup.sl - currentSetup.entry
+                if low <= currentSetup.entry - (riskPips * beLevel)
+                    moveToBE := true
+
+// Reset currentSetup when trade is completed so new setups can trigger
+if tradeCompleted
+    currentSetup := na
+
+// ═════════════════════════════════════════════════════════════════════════════
+// TRADING DASHBOARD - Your Command Center
+// ═════════════════════════════════════════════════════════════════════════════
+
+var table dashboard = table.new(position.top_right, 2, 10, border_width=1, frame_color=color.new(color.gray, 50), frame_width=1, border_color=color.new(color.gray, 70))
+
+if true
+    // Header
+    table.cell(dashboard, 0, 0, '💎 MTF SMC', bgcolor=color.new(color.blue, 30), text_color=color.white, text_size=size.large)
+    table.merge_cells(dashboard, 0, 0, 1, 0)
+    
+    // Current Zone
+    zoneColor = currentZone == 'DISCOUNT' ? color.green : currentZone == 'PREMIUM' ? color.red : color.gray
+    zoneEmoji = currentZone == 'DISCOUNT' ? '🟢' : currentZone == 'PREMIUM' ? '🔴' : '⚪'
+    table.cell(dashboard, 0, 1, '📍 Zone:', bgcolor=color.new(color.gray, 85), text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 1, zoneEmoji + ' ' + currentZone, bgcolor=color.new(zoneColor, 80), text_color=color.white, text_size=size.normal)
+    
+    // Current Trend
+    trendText = trend == 1 ? '📈 BULLISH' : trend == -1 ? '📉 BEARISH' : '➡ NEUTRAL'
+    trendColor = trend == 1 ? color.green : trend == -1 ? color.red : color.gray
+    table.cell(dashboard, 0, 2, '🎯 Trend:', bgcolor=color.new(color.gray, 85), text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 2, trendText, bgcolor=color.new(trendColor, 80), text_color=color.white, text_size=size.normal)
+    
+    // HTF Bias
+    htfBiasText = htfBullish ? '🔥 BULLISH' : htfBearish ? '❄ BEARISH' : '🌀 MIXED'
+    htfBiasColor = htfBullish ? color.green : htfBearish ? color.red : color.orange
+    table.cell(dashboard, 0, 3, '⏰ HTF Bias:', bgcolor=color.new(color.gray, 85), text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 3, htfBiasText, bgcolor=color.new(htfBiasColor, 80), text_color=color.white, text_size=size.normal)
+    
+    // Structure Status
+    structureText = swingHigh.crossed and trend == 1 ? 'Bullish BOS ✅' :  swingLow.crossed and trend == -1 ? 'Bearish BOS ✅' :     'Waiting...'
+    structureColor = trend == 1 ? color.green : trend == -1 ? color.red : color.gray
+    table.cell(dashboard, 0, 4, '🔄 Structure:', bgcolor=color.new(color.gray, 85), text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 4, structureText, bgcolor=color.new(structureColor, 85), text_color=color.white, text_size=size.small)
+    
+    // Order Block Status
+    obStatus = inBullishOB ? '🟢 In Bull OB' : inBearishOB ? '🔴 In Bear OB' : '⚪ No OB'
+    obColor = inBullishOB ? color.green : inBearishOB ? color.red : color.gray
+    table.cell(dashboard, 0, 5, '📦 Order Block:', bgcolor=color.new(color.gray, 85), text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 5, obStatus, bgcolor=color.new(obColor, 85), text_color=color.white, text_size=size.small)
+    
+    // Setup Quality
+    qualityText = setupQuality == 'HIGH' ? '⭐⭐⭐ HIGH' : setupQuality == 'MEDIUM' ? '⭐⭐ MEDIUM' : '⭐ LOW'
+    qualityColor = setupQuality == 'HIGH' ? color.green : setupQuality == 'MEDIUM' ? color.orange : color.gray
+    table.cell(dashboard, 0, 6, '⚡ Quality:', bgcolor=color.new(color.gray, 85), text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 6, qualityText, bgcolor=color.new(qualityColor, 80), text_color=color.white, text_size=size.small)
+    
+    // Active Setup Type
+    hasActiveSetup = not na(currentSetup) ? currentSetup.active : false
+    isQuickSetup = not na(currentSetup) ? currentSetup.isQuick : false
+    activeSetupType = not na(currentSetup) ? currentSetup.setupType : ''
+    setupTypeText = hasActiveSetup ? activeSetupType : enableQuick ? '⚡/🎯 Ready' : '🎯 Sniper Only'
+    setupTypeColor = hasActiveSetup ? (isQuickSetup ? color.yellow : color.blue) : color.gray
+    table.cell(dashboard, 0, 7, '🎪 Setup Mode:', bgcolor=color.new(color.gray, 85), text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 7, setupTypeText, bgcolor=color.new(setupTypeColor, 80), text_color=color.white, text_size=size.small)
+    
+    // Win Rate
+    if trackWinRate and totalSetups > 0
+        winRateText = str.tostring(winRate, '#.#') + '% (' + str.tostring(wonSetups) + '/' + str.tostring(totalSetups) + ')'
+        winRateColor = winRate >= 60 ? color.green : winRate >= 50 ? color.orange : color.red
+        table.cell(dashboard, 0, 8, '📊 Win Rate:', bgcolor=color.new(color.gray, 85), text_color=color.white, text_size=size.small)
+        table.cell(dashboard, 1, 8, winRateText, bgcolor=color.new(winRateColor, 80), text_color=color.white, text_size=size.small)
+    else
+        table.cell(dashboard, 0, 8, '📊 Win Rate:', bgcolor=color.new(color.gray, 85), text_color=color.white, text_size=size.small)
+        table.cell(dashboard, 1, 8, 'Not enough data', bgcolor=color.new(color.gray, 85), text_color=color.white, text_size=size.tiny)
+    
+    // Move to BE indicator
+    beText = moveToBE ? '✅ MOVE TO BE NOW!' : hasActiveSetup ? '⏳ Waiting...' : '⚪ No Active Trade'
+    beColor = moveToBE ? color.green : hasActiveSetup ? color.orange : color.gray
+    table.cell(dashboard, 0, 9, '🎯 Break-Even:', bgcolor=color.new(color.gray, 85), text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 9, beText, bgcolor=color.new(beColor, 80), text_color=color.white, text_size=size.small)
+
+// ═════════════════════════════════════════════════════════════════════════════
+// ALERTS - Get Notified When Things Happen
+// ═════════════════════════════════════════════════════════════════════════════
+
+alertcondition(setupTriggered, '🚀 ENTRY SIGNAL', '🚀 SNIPER ENTRY DETECTED!\nCheck Entry/SL/TPs on chart!')
+alertcondition(moveToBE, '🎯 MOVE TO BREAK-EVEN', '🎯 Move your SL to Break-Even NOW!')
+alertcondition(currentZone == 'DISCOUNT' and currentZone[1] != 'DISCOUNT', '🟢 DISCOUNT Zone', 'Price entered DISCOUNT - Watch for BUY setups')
+alertcondition(currentZone == 'PREMIUM' and currentZone[1] != 'PREMIUM', '🔴 PREMIUM Zone', 'Price entered PREMIUM - Watch for SELL setups')
+alertcondition(trend == 1 and trend[1] != 1, '📈 Bullish BOS', 'Bullish Break of Structure confirmed!')
+alertcondition(trend == -1 and trend[1] != -1, '📉 Bearish BOS', 'Bearish Break of Structure confirmed!')
