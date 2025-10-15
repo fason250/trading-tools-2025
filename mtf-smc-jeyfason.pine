@@ -6,9 +6,9 @@ indicator('MTF Smart Money Trading System - Pro', 'MTF-SMC-PRO', overlay=true, m
 // ═════════════════════════════════════════════════════════════════════════════
 
 // Timeframes
-htf1 = input.timeframe('240', 'HTF 1 (4H)', group='🕐 Timeframes')
-htf2 = input.timeframe('D', 'HTF 2 (Daily)', group='🕐 Timeframes')
-htf3 = input.timeframe('W', 'HTF 3 (Weekly)', group='🕐 Timeframes')
+htf1 = input.timeframe('60', 'HTF 1 (1H)', group='🕐 Timeframes')
+htf2 = input.timeframe('240', 'HTF 2 (4H)', group='🕐 Timeframes')
+htf3 = input.timeframe('D', 'HTF 3 (Daily)', group='🕐 Timeframes')
 
 // Structure Settings
 swingLength = input.int(25, 'External Structure Length', minval=10, maxval=50, group='📊 Structure', tooltip='Only major swings - ignore noise')
@@ -17,7 +17,7 @@ showBOS = input.bool(true, 'Show BOS (Break of Structure)', group='📊 Structur
 showCHOCH = input.bool(true, 'Show CHoCH (Change of Character)', group='📊 Structure')
 showEntry = input.bool(true, 'Show Entry Levels', group='📊 Structure')
 biasMode = input.string('Majority (2/3) + Daily Anchor', 'Bias Mode', options=['Strict (3/3)', 'Majority (2/3) + Daily Anchor', 'Daily Only'], group='📊 Structure')
-weeklyBlockBars = input.int(5, 'Block if Weekly Opp Change ≤ N bars', minval=0, maxval=20, group='📊 Structure')
+weeklyBlockBars = input.int(0, 'Block if Weekly Opp Change ≤ N bars', minval=0, maxval=20, group='📊 Structure')
 
 // Order Blocks
 showOB = input.bool(true, 'Show Order Blocks', group='📦 Order Blocks')
@@ -42,7 +42,7 @@ rr1 = input.float(2.0, 'TP1 Risk:Reward (Sniper)', minval=1.0, step=0.5, group='
 rr2 = input.float(3.0, 'TP2 Risk:Reward (Sniper)', minval=1.5, step=0.5, group='🎯 Sniper Setups')
 rr3 = input.float(5.0, 'TP3 Risk:Reward (Sniper)', minval=2.0, step=0.5, group='🎯 Sniper Setups')
 showTP3 = input.bool(true, 'Show TP3 (Swing Target)', group='🎯 Sniper Setups')
-beLevel = input.float(1.0, 'Move to BE at R:R', minval=0.5, step=0.5, group='🎯 Sniper Setups', tooltip='When to move SL to break-even')
+enableProSniper = input.bool(true, 'Enable Pro Sniper Mode', group='🎯 Sniper Setups', tooltip='Extreme unmitigated OB + Sweep + Displacement (FVG) + HTF bias')
 
 // Quick Setups - Zone Reactions
 enableQuick = input.bool(true, 'Enable Quick Setups', group='⚡ Quick Setups', tooltip='Catch zone bounces with engulfing/rejection')
@@ -57,7 +57,6 @@ quickMinBodyATR = input.float(0.6, 'Min Body as ATR multiple', minval=0.1, maxva
 quickBoundaryPct = input.float(0.15, 'Max Distance from Zone Boundary (% of HTF range)', minval=0.01, maxval=0.5, step=0.01, group='⚡ Quick Setups')
 quickCooldownBars = input.int(10, 'Cooldown Bars After Quick Trade', minval=0, maxval=500, group='⚡ Quick Setups')
 quickMaxPerDay = input.int(3, 'Max Quick Trades per Day', minval=1, maxval=20, group='⚡ Quick Setups')
-quickSession = input.session('0700-1700', 'Quick Session', group='⚡ Quick Setups')
 
 // Alerts
 showAlerts = input.bool(true, 'Show Entry Alerts', group='🔔 Alerts')
@@ -74,6 +73,7 @@ type OrderBlock
     bool isBullish
     bool mitigated
     box display
+    bool isExtreme
 
 type FVG
     float top
@@ -190,7 +190,7 @@ detectFVG() =>
 
 // Detect Order Block (the candle that caused the move)
 findOrderBlock(pivotBar, isBullish) =>
-    ob = OrderBlock.new(na, na, na, isBullish, false, na)
+    ob = OrderBlock.new(na, na, na, isBullish, false, na, true)
     
     if isBullish
         // Find last bearish candle before the swing low (institution sell that created the low)
@@ -242,6 +242,8 @@ alertZone(zone) =>
 var Structure swingHigh = Structure.new(na, na, na, false, false, '')
 var Structure swingLow = Structure.new(na, na, na, true, false, '')
 var int trend = 0  // 1 = bullish, -1 = bearish, 0 = neutral
+var int legId = 0
+var int proEntriesThisLeg = 0  // count pro-sniper entries per leg
 
 // Order Blocks storage
 var array<OrderBlock> bullishOBs = array.new<OrderBlock>()
@@ -355,12 +357,18 @@ legChanged = ta.change(currentLeg)
 
 // Update swing points
 if legChanged != 0
+    // New leg -> reset per-leg counters
+    legId += 1
+    proEntriesThisLeg := 0
     if legChanged == -1  // New bearish leg = we have a swing high
         swingHigh.level := high[swingLength]
         swingHigh.barTime := time[swingLength]
         swingHigh.barIndex := bar_index[swingLength]
         swingHigh.crossed := false
         swingHigh.label := swingHigh.level > swingHigh.level[1] ? 'HH' : 'LH'
+        // Mark swing high
+        label.new(swingHigh.barIndex, swingHigh.level, swingHigh.label, 
+             style=label.style_label_down, color=color.new(color.red, 30), textcolor=color.white, size=size.tiny, xloc=xloc.bar_index)
         
         // Create bearish order block
         if showOB
@@ -378,6 +386,9 @@ if legChanged != 0
         swingLow.barIndex := bar_index[swingLength]
         swingLow.crossed := false
         swingLow.label := swingLow.level < swingLow.level[1] ? 'LL' : 'HL'
+        // Mark swing low
+        label.new(swingLow.barIndex, swingLow.level, swingLow.label, 
+             style=label.style_label_up, color=color.new(color.green, 30), textcolor=color.white, size=size.tiny, xloc=xloc.bar_index)
         
         // Create bullish order block
         if showOB
@@ -399,7 +410,6 @@ if ta.crossover(close, swingHigh.level) and not swingHigh.crossed
     structureType = trend == -1 ? 'CHoCH' : 'BOS'
     
     if (structureType == 'BOS' and showBOS) or (structureType == 'CHoCH' and showCHOCH)
-        label.delete(lastStructureLabel)
         lastStructureLabel := label.new(bar_index, swingHigh.level, structureType, 
              style=label.style_label_down, color=bullColor, textcolor=color.white, size=size.small)
         line.new(swingHigh.barIndex, swingHigh.level, bar_index, swingHigh.level, 
@@ -414,7 +424,6 @@ if ta.crossunder(close, swingLow.level) and not swingLow.crossed
     structureType = trend == 1 ? 'CHoCH' : 'BOS'
     
     if (structureType == 'BOS' and showBOS) or (structureType == 'CHoCH' and showCHOCH)
-        label.delete(lastStructureLabel)
         lastStructureLabel := label.new(bar_index, swingLow.level, structureType, 
              style=label.style_label_up, color=bearColor, textcolor=color.white, size=size.small)
         line.new(swingLow.barIndex, swingLow.level, bar_index, swingLow.level, 
@@ -604,9 +613,30 @@ winProbability = trackWinRate and totalSetups > 10 ? winRate : conditionsMet == 
 // ENTRY SIGNAL GENERATION - Sniper Entries
 // ═════════════════════════════════════════════════════════════════════════════
 
-// Detect HIGH quality setup
-buySetupConfirmed = currentZone == 'DISCOUNT' and htfBullish and trend == 1 and inBullishOB
-sellSetupConfirmed = currentZone == 'PREMIUM' and htfBearish and trend == -1 and inBearishOB
+// Detect HIGH quality setup (Basic)
+buySetupConfirmedBasic = currentZone == 'DISCOUNT' and htfBullish and trend == 1 and inBullishOB
+sellSetupConfirmedBasic = currentZone == 'PREMIUM' and htfBearish and trend == -1 and inBearishOB
+
+// Pro Sniper extras
+inExtremeBullishOB = false
+inExtremeBearishOB = false
+for ob in bullishOBs
+    if not ob.mitigated and ob.isExtreme and close >= ob.bottom and close <= ob.top
+        inExtremeBullishOB := true
+        break
+for ob in bearishOBs
+    if not ob.mitigated and ob.isExtreme and close >= ob.bottom and close <= ob.top
+        inExtremeBearishOB := true
+        break
+
+bullishFVGNow_sniper = low > high[2] and close > high[2] and close[1] > high[2]
+bearishFVGNow_sniper = high < low[2] and close < low[2] and close[1] < low[2]
+
+buySetupConfirmedPro = currentZone == 'DISCOUNT' and htfBullish and trend == 1 and inExtremeBullishOB and isBullishLiquiditySweep() and bullishFVGNow_sniper and proEntriesThisLeg < 2
+sellSetupConfirmedPro = currentZone == 'PREMIUM' and htfBearish and trend == -1 and inExtremeBearishOB and isBearishLiquiditySweep() and bearishFVGNow_sniper and proEntriesThisLeg < 2
+
+buySetupConfirmed = enableProSniper ? buySetupConfirmedPro : buySetupConfirmedBasic
+sellSetupConfirmed = enableProSniper ? sellSetupConfirmedPro : sellSetupConfirmedBasic
 
 // Reset trigger at start of bar
 setupTriggered := false
@@ -635,7 +665,7 @@ if buySetupConfirmed and showEntry and na(currentSetup)
     currentSetup.winProb := winProbability
     currentSetup.active := true
     currentSetup.isQuick := false
-    currentSetup.setupType := '🎯 SNIPER'
+    currentSetup.setupType := enableProSniper ? '🎯 PRO SNIPER' : '🎯 SNIPER'
     currentSetup.movedToBE := false
     
     // Draw projection-style visuals
@@ -668,6 +698,8 @@ if buySetupConfirmed and showEntry and na(currentSetup)
     
     totalSetups += 1
     setupTriggered := true
+    if enableProSniper
+        proEntriesThisLeg += 1
 
 if sellSetupConfirmed and showEntry and na(currentSetup)
     // Calculate levels
@@ -692,7 +724,7 @@ if sellSetupConfirmed and showEntry and na(currentSetup)
     currentSetup.winProb := winProbability
     currentSetup.active := true
     currentSetup.isQuick := false
-    currentSetup.setupType := '🎯 SNIPER'
+    currentSetup.setupType := enableProSniper ? '🎯 PRO SNIPER' : '🎯 SNIPER'
     currentSetup.movedToBE := false
     
     // Draw projection-style visuals
@@ -725,6 +757,8 @@ if sellSetupConfirmed and showEntry and na(currentSetup)
     
     totalSetups += 1
     setupTriggered := true
+    if enableProSniper
+        proEntriesThisLeg += 1
 
 // ═════════════════════════════════════════════════════════════════════════════
 // QUICK SETUPS - Zone Reaction Entries
@@ -736,7 +770,6 @@ if na(lastDay) or dayofmonth != lastDay
     lastDay := dayofmonth
 
 // Helper filters and gating
-inQuickSession = not na(time(timeframe.period, quickSession))
 atr14 = ta.atr(14)
 bodySize = math.abs(close - open)
 bodyOK = atr14 > 0 ? bodySize >= quickMinBodyATR * atr14 : true
@@ -757,7 +790,7 @@ okDaily = quickCountToday < quickMaxPerDay
 
 // Check for Quick Buy Setup
 quickBuySetup = false
-preBuyGate = enableQuick and na(currentSetup) and currentZone == 'DISCOUNT' and trend == 1 and inQuickSession and okCooldown and okDaily
+preBuyGate = enableQuick and na(currentSetup) and currentZone == 'DISCOUNT' and trend == 1 and okCooldown and okDaily
 if preBuyGate
     hasEngulfing = isBullishEngulfing()
     hasRejection = isBullishRejection(minWickRatio)
@@ -825,7 +858,7 @@ if quickBuySetup
 
 // Check for Quick Sell Setup
 quickSellSetup = false
-preSellGate = enableQuick and na(currentSetup) and currentZone == 'PREMIUM' and trend == -1 and inQuickSession and okCooldown and okDaily
+preSellGate = enableQuick and na(currentSetup) and currentZone == 'PREMIUM' and trend == -1 and okCooldown and okDaily
 if preSellGate
     hasEngulfing = isBearishEngulfing()
     hasRejection = isBearishRejection(minWickRatio)
@@ -1074,7 +1107,7 @@ if true
         table.cell(dashboard, 1, 8, winRateText, bgcolor=color.new(winRateColor, 80), text_color=color.white, text_size=size.small)
     else
         table.cell(dashboard, 0, 8, '📊 Win Rate:', bgcolor=color.new(color.gray, 85), text_color=color.white, text_size=size.small)
-        table.cell(dashboard, 1, 8, 'Not enough data', bgcolor=color.new(color.gray, 85), text_color=color.white, text_size=size.tiny)
+        table.cell(dashboard, 1, 8, '0% (0/0)', bgcolor=color.new(color.gray, 85), text_color=color.white, text_size=size.tiny)
     
     // Move to BE indicator
     beText = moveToBE ? '✅ MOVE TO BE NOW!' : hasActiveSetup ? '⏳ Waiting...' : '⚪ No Active Trade'
