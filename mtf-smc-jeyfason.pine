@@ -16,6 +16,8 @@ entryTF = input.timeframe('60', 'Entry Timeframe', group='📊 Structure', toolt
 showBOS = input.bool(true, 'Show BOS (Break of Structure)', group='📊 Structure')
 showCHOCH = input.bool(true, 'Show CHoCH (Change of Character)', group='📊 Structure')
 showEntry = input.bool(true, 'Show Entry Levels', group='📊 Structure')
+biasMode = input.string('Majority (2/3) + Daily Anchor', 'Bias Mode', options=['Strict (3/3)', 'Majority (2/3) + Daily Anchor', 'Daily Only'], group='📊 Structure')
+weeklyBlockBars = input.int(5, 'Block if Weekly Opp Change ≤ N bars', minval=0, maxval=20, group='📊 Structure')
 
 // Order Blocks
 showOB = input.bool(true, 'Show Order Blocks', group='📦 Order Blocks')
@@ -116,6 +118,15 @@ type TradeSetup
     line tp2Line
     line tp3Line
     label setupLabel
+    box riskBox
+    box rewardBox1
+    box rewardBox2
+    box rewardBox3
+    box progressBox
+    bool movedToBE
+    label tp1Tag
+    label tp2Tag
+    label tp3Tag
 
 // ═════════════════════════════════════════════════════════════════════════════
 // CORE FUNCTIONS - The Real SMC Logic
@@ -305,9 +316,37 @@ htf1Data = getHTFData(htf1)
 htf2Data = getHTFData(htf2)
 htf3Data = getHTFData(htf3)
 
-// HTF Bias (all HTFs must align for high-probability setup)
-htfBullish = htf1Data.bullish and htf2Data.bullish and htf3Data.bullish
-htfBearish = not htf1Data.bullish and not htf2Data.bullish and not htf3Data.bullish
+// HTF Bias (configurable)
+_dBull = htf2Data.bullish
+_wBull = htf3Data.bullish
+_h4Bull = htf1Data.bullish
+
+// Declare bias flags
+var bool htfBullish = false
+var bool htfBearish = false
+
+// Weekly recent bias flip cool-off
+weeklyBarsSinceFlip = request.security(syminfo.tickerid, htf3, ta.barssince(ta.change(close > open)))
+weeklyRecentFlip = weeklyBlockBars > 0 and weeklyBarsSinceFlip >= 0 and weeklyBarsSinceFlip <= weeklyBlockBars
+
+if biasMode == 'Strict (3/3)'
+    htfBullish := _h4Bull and _dBull and _wBull
+    htfBearish := not _h4Bull and not _dBull and not _wBull
+else if biasMode == 'Daily Only'
+    htfBullish := _dBull
+    htfBearish := not _dBull
+else
+    // Majority 2/3 + Daily Anchor
+    bullVotes = (_h4Bull ? 1 : 0) + (_dBull ? 1 : 0) + (_wBull ? 1 : 0)
+    bearVotes = (not _h4Bull ? 1 : 0) + (not _dBull ? 1 : 0) + (not _wBull ? 1 : 0)
+    htfBullish := _dBull and bullVotes >= 2
+    htfBearish := not _dBull and bearVotes >= 2
+
+// Apply weekly cool-off (block both sides if recent flip)
+if weeklyRecentFlip
+    htfBullish := false
+    htfBearish := false
+
 htfMixed = not htfBullish and not htfBearish
 
 // Detect swing structure
@@ -597,17 +636,34 @@ if buySetupConfirmed and showEntry and na(currentSetup)
     currentSetup.active := true
     currentSetup.isQuick := false
     currentSetup.setupType := '🎯 SNIPER'
+    currentSetup.movedToBE := false
     
-    // Draw lines
-    currentSetup.entryLine := line.new(bar_index, entryPrice, bar_index + 50, entryPrice, xloc=xloc.bar_index, color=color.white, width=2, style=line.style_solid)
-    currentSetup.slLine := line.new(bar_index, slPrice, bar_index + 50, slPrice, xloc=xloc.bar_index, color=bearColor, width=2, style=line.style_dashed)
-    currentSetup.tp1Line := line.new(bar_index, tp1Price, bar_index + 50, tp1Price, xloc=xloc.bar_index, color=bullColor, width=1, style=line.style_dashed)
-    currentSetup.tp2Line := line.new(bar_index, tp2Price, bar_index + 50, tp2Price, xloc=xloc.bar_index, color=bullColor, width=2, style=line.style_dashed)
+    // Draw projection-style visuals
+    projWidth = 50
+    currentSetup.entryLine := line.new(bar_index, entryPrice, bar_index + projWidth, entryPrice, xloc=xloc.bar_index, color=color.white, width=2, style=line.style_solid)
+    currentSetup.slLine := line.new(bar_index, slPrice, bar_index + projWidth, slPrice, xloc=xloc.bar_index, color=bearColor, width=2, style=line.style_dashed)
+    currentSetup.tp1Line := line.new(bar_index, tp1Price, bar_index + projWidth, tp1Price, xloc=xloc.bar_index, color=bullColor, width=1, style=line.style_dashed)
+    currentSetup.tp2Line := line.new(bar_index, tp2Price, bar_index + projWidth, tp2Price, xloc=xloc.bar_index, color=bullColor, width=2, style=line.style_dashed)
     if showTP3 and not na(tp3Price)
-        currentSetup.tp3Line := line.new(bar_index, tp3Price, bar_index + 50, tp3Price, xloc=xloc.bar_index, color=bullColor, width=3, style=line.style_solid)
+        currentSetup.tp3Line := line.new(bar_index, tp3Price, bar_index + projWidth, tp3Price, xloc=xloc.bar_index, color=bullColor, width=3, style=line.style_solid)
+    // Risk/Reward boxes
+    currentSetup.riskBox := box.new(bar_index, entryPrice, bar_index + projWidth, slPrice, xloc=xloc.bar_index, bgcolor=color.new(color.red, 85), border_color=color.new(color.red, 60))
+    currentSetup.rewardBox1 := box.new(bar_index, tp1Price, bar_index + projWidth, entryPrice, xloc=xloc.bar_index, bgcolor=color.new(color.green, 90), border_color=color.new(color.green, 70))
+    currentSetup.rewardBox2 := box.new(bar_index, tp2Price, bar_index + projWidth, entryPrice, xloc=xloc.bar_index, bgcolor=color.new(color.green, 92), border_color=color.new(color.green, 80))
+    currentSetup.rewardBox3 := showTP3 and not na(tp3Price) ? box.new(bar_index, tp3Price, bar_index + projWidth, entryPrice, xloc=xloc.bar_index, bgcolor=color.new(color.green, 94), border_color=color.new(color.green, 90)) : na
+    // Live progress box from entry to current price
+    progTop = math.max(entryPrice, close)
+    progBot = math.min(entryPrice, close)
+    progColor = close >= entryPrice ? color.new(color.green, 80) : color.new(color.red, 80)
+    currentSetup.progressBox := box.new(bar_index, progTop, bar_index, progBot, xloc=xloc.bar_index, bgcolor=progColor, border_color=color.new(color.gray, 90))
     
-    // Draw label
-    labelText = '🚀 BUY ENTRY\n━━━━━━━━━━\n' + '📍 Entry: ' + str.tostring(entryPrice, '#.##') + '\n' + '❌ SL: ' + str.tostring(slPrice, '#.##') + '\n' + '✅ TP1: ' + str.tostring(tp1Price, '#.##') + ' (1:' + str.tostring(rr1, '#.#') + ')\n' + '✅ TP2: ' + str.tostring(tp2Price, '#.##') + ' (1:' + str.tostring(rr2, '#.#') + ')\n' + (showTP3 ? '🎯 TP3: ' + str.tostring(tp3Price, '#.##') + ' (1:' + str.tostring(rr3, '#.#') + ')\n' : '') + '📊 Win Prob: ' + str.tostring(winProbability, '#.#') + '%\n' + '⚡ Quality: ' + setupQuality
+    // TP labels
+    currentSetup.tp1Tag := label.new(bar_index + 1, tp1Price, 'TP1', xloc=xloc.bar_index, style=label.style_label_left, color=color.new(color.green, 70), textcolor=color.white, size=size.tiny)
+    currentSetup.tp2Tag := label.new(bar_index + 1, tp2Price, 'TP2', xloc=xloc.bar_index, style=label.style_label_left, color=color.new(color.green, 60), textcolor=color.white, size=size.tiny)
+    currentSetup.tp3Tag := showTP3 and not na(tp3Price) ? label.new(bar_index + 1, tp3Price, 'TP3', xloc=xloc.bar_index, style=label.style_label_left, color=color.new(color.green, 50), textcolor=color.white, size=size.tiny) : na
+    
+    // Draw label (full precision)
+    labelText = '🚀 BUY ENTRY\n━━━━━━━━━━\n' + '📍 Entry: ' + str.tostring(entryPrice) + '\n' + '❌ SL: ' + str.tostring(slPrice) + '\n' + '✅ TP1: ' + str.tostring(tp1Price) + ' (1:' + str.tostring(rr1) + ')\n' + '✅ TP2: ' + str.tostring(tp2Price) + ' (1:' + str.tostring(rr2) + ')' + (showTP3 ? '\n🎯 TP3: ' + str.tostring(tp3Price) + ' (1:' + str.tostring(rr3) + ')' : '') + '\n📊 Win Prob: ' + str.tostring(winProbability) + '%\n⚡ Quality: ' + setupQuality
     currentSetup.setupLabel := label.new(bar_index, low, labelText, style=label.style_label_up, color=bullColor, textcolor=color.white, size=size.normal)
     
     totalSetups += 1
@@ -637,17 +693,34 @@ if sellSetupConfirmed and showEntry and na(currentSetup)
     currentSetup.active := true
     currentSetup.isQuick := false
     currentSetup.setupType := '🎯 SNIPER'
+    currentSetup.movedToBE := false
     
-    // Draw lines
-    currentSetup.entryLine := line.new(bar_index, entryPrice, bar_index + 50, entryPrice, xloc=xloc.bar_index, color=color.white, width=2, style=line.style_solid)
-    currentSetup.slLine := line.new(bar_index, slPrice, bar_index + 50, slPrice, xloc=xloc.bar_index, color=bearColor, width=2, style=line.style_dashed)
-    currentSetup.tp1Line := line.new(bar_index, tp1Price, bar_index + 50, tp1Price, xloc=xloc.bar_index, color=bullColor, width=1, style=line.style_dashed)
-    currentSetup.tp2Line := line.new(bar_index, tp2Price, bar_index + 50, tp2Price, xloc=xloc.bar_index, color=bullColor, width=2, style=line.style_dashed)
+    // Draw projection-style visuals
+    projWidth = 50
+    currentSetup.entryLine := line.new(bar_index, entryPrice, bar_index + projWidth, entryPrice, xloc=xloc.bar_index, color=color.white, width=2, style=line.style_solid)
+    currentSetup.slLine := line.new(bar_index, slPrice, bar_index + projWidth, slPrice, xloc=xloc.bar_index, color=bearColor, width=2, style=line.style_dashed)
+    currentSetup.tp1Line := line.new(bar_index, tp1Price, bar_index + projWidth, tp1Price, xloc=xloc.bar_index, color=bullColor, width=1, style=line.style_dashed)
+    currentSetup.tp2Line := line.new(bar_index, tp2Price, bar_index + projWidth, tp2Price, xloc=xloc.bar_index, color=bullColor, width=2, style=line.style_dashed)
     if showTP3 and not na(tp3Price)
-        currentSetup.tp3Line := line.new(bar_index, tp3Price, bar_index + 50, tp3Price, xloc=xloc.bar_index, color=bullColor, width=3, style=line.style_solid)
+        currentSetup.tp3Line := line.new(bar_index, tp3Price, bar_index + projWidth, tp3Price, xloc=xloc.bar_index, color=bullColor, width=3, style=line.style_solid)
+    // Risk/Reward boxes
+    currentSetup.riskBox := box.new(bar_index, slPrice, bar_index + projWidth, entryPrice, xloc=xloc.bar_index, bgcolor=color.new(color.red, 85), border_color=color.new(color.red, 60))
+    currentSetup.rewardBox1 := box.new(bar_index, entryPrice, bar_index + projWidth, tp1Price, xloc=xloc.bar_index, bgcolor=color.new(color.green, 90), border_color=color.new(color.green, 70))
+    currentSetup.rewardBox2 := box.new(bar_index, entryPrice, bar_index + projWidth, tp2Price, xloc=xloc.bar_index, bgcolor=color.new(color.green, 92), border_color=color.new(color.green, 80))
+    currentSetup.rewardBox3 := showTP3 and not na(tp3Price) ? box.new(bar_index, entryPrice, bar_index + projWidth, tp3Price, xloc=xloc.bar_index, bgcolor=color.new(color.green, 94), border_color=color.new(color.green, 90)) : na
+    // Live progress box from entry to current price
+    progTopS = math.max(entryPrice, close)
+    progBotS = math.min(entryPrice, close)
+    progColorS = close <= entryPrice ? color.new(color.green, 80) : color.new(color.red, 80)
+    currentSetup.progressBox := box.new(bar_index, progTopS, bar_index, progBotS, xloc=xloc.bar_index, bgcolor=progColorS, border_color=color.new(color.gray, 90))
     
-    // Draw label
-    labelText = '🔻 SELL ENTRY\n━━━━━━━━━━\n' + '📍 Entry: ' + str.tostring(entryPrice, '#.##') + '\n' + '❌ SL: ' + str.tostring(slPrice, '#.##') + '\n' + '✅ TP1: ' + str.tostring(tp1Price, '#.##') + ' (1:' + str.tostring(rr1, '#.#') + ')\n' + '✅ TP2: ' + str.tostring(tp2Price, '#.##') + ' (1:' + str.tostring(rr2, '#.#') + ')\n' + (showTP3 ? '🎯 TP3: ' + str.tostring(tp3Price, '#.##') + ' (1:' + str.tostring(rr3, '#.#') + ')\n' : '') + '📊 Win Prob: ' + str.tostring(winProbability, '#.#') + '%\n' + '⚡ Quality: ' + setupQuality
+    // TP labels
+    currentSetup.tp1Tag := label.new(bar_index + 1, tp1Price, 'TP1', xloc=xloc.bar_index, style=label.style_label_left, color=color.new(color.green, 70), textcolor=color.white, size=size.tiny)
+    currentSetup.tp2Tag := label.new(bar_index + 1, tp2Price, 'TP2', xloc=xloc.bar_index, style=label.style_label_left, color=color.new(color.green, 60), textcolor=color.white, size=size.tiny)
+    currentSetup.tp3Tag := showTP3 and not na(tp3Price) ? label.new(bar_index + 1, tp3Price, 'TP3', xloc=xloc.bar_index, style=label.style_label_left, color=color.new(color.green, 50), textcolor=color.white, size=size.tiny) : na
+    
+    // Draw label (full precision)
+    labelText = '🔻 SELL ENTRY\n━━━━━━━━━━\n' + '📍 Entry: ' + str.tostring(entryPrice) + '\n' + '❌ SL: ' + str.tostring(slPrice) + '\n' + '✅ TP1: ' + str.tostring(tp1Price) + ' (1:' + str.tostring(rr1) + ')\n' + '✅ TP2: ' + str.tostring(tp2Price) + ' (1:' + str.tostring(rr2) + ')' + (showTP3 ? '\n🎯 TP3: ' + str.tostring(tp3Price) + ' (1:' + str.tostring(rr3) + ')' : '') + '\n📊 Win Prob: ' + str.tostring(winProbability) + '%\n⚡ Quality: ' + setupQuality
     currentSetup.setupLabel := label.new(bar_index, high, labelText, style=label.style_label_down, color=bearColor, textcolor=color.white, size=size.normal)
     
     totalSetups += 1
@@ -720,17 +793,28 @@ if quickBuySetup
     currentSetup.active := true
     currentSetup.isQuick := true
     currentSetup.setupType := '⚡ QUICK'
+    currentSetup.movedToBE := false
     
-    // Draw lines (yellow/orange for quick)
+    // Draw projection-style visuals (yellow theme)
     quickColor = color.new(color.yellow, 0)
-    currentSetup.entryLine := line.new(bar_index, entryPrice, bar_index + 30, entryPrice, xloc=xloc.bar_index, color=quickColor, width=2, style=line.style_solid)
-    currentSetup.slLine := line.new(bar_index, slPrice, bar_index + 30, slPrice, xloc=xloc.bar_index, color=bearColor, width=2, style=line.style_dashed)
-    currentSetup.tp1Line := line.new(bar_index, tp1Price, bar_index + 30, tp1Price, xloc=xloc.bar_index, color=bullColor, width=1, style=line.style_dashed)
-    currentSetup.tp2Line := line.new(bar_index, tp2Price, bar_index + 30, tp2Price, xloc=xloc.bar_index, color=bullColor, width=2, style=line.style_dashed)
+    projWidthQ = 30
+    currentSetup.entryLine := line.new(bar_index, entryPrice, bar_index + projWidthQ, entryPrice, xloc=xloc.bar_index, color=quickColor, width=2, style=line.style_solid)
+    currentSetup.slLine := line.new(bar_index, slPrice, bar_index + projWidthQ, slPrice, xloc=xloc.bar_index, color=bearColor, width=2, style=line.style_dashed)
+    currentSetup.tp1Line := line.new(bar_index, tp1Price, bar_index + projWidthQ, tp1Price, xloc=xloc.bar_index, color=bullColor, width=1, style=line.style_dashed)
+    currentSetup.tp2Line := line.new(bar_index, tp2Price, bar_index + projWidthQ, tp2Price, xloc=xloc.bar_index, color=bullColor, width=2, style=line.style_dashed)
     currentSetup.tp3Line := na
+    currentSetup.riskBox := box.new(bar_index, entryPrice, bar_index + projWidthQ, slPrice, xloc=xloc.bar_index, bgcolor=color.new(color.orange, 85), border_color=color.new(color.orange, 60))
+    currentSetup.rewardBox1 := box.new(bar_index, tp1Price, bar_index + projWidthQ, entryPrice, xloc=xloc.bar_index, bgcolor=color.new(color.green, 90), border_color=color.new(color.green, 70))
+    currentSetup.rewardBox2 := box.new(bar_index, tp2Price, bar_index + projWidthQ, entryPrice, xloc=xloc.bar_index, bgcolor=color.new(color.green, 92), border_color=color.new(color.green, 80))
+    currentSetup.rewardBox3 := na
     
-    // Draw label
-    labelText = '⚡ QUICK BUY\n━━━━━━━━━━\n' + '📍 Entry: ' + str.tostring(entryPrice, '#.##') + '\n' + '❌ SL: ' + str.tostring(slPrice, '#.##') + '\n' + '✅ TP1: ' + str.tostring(tp1Price, '#.##') + ' (1:' + str.tostring(quickRR1, '#.#') + ')\n' + '✅ TP2: ' + str.tostring(tp2Price, '#.##') + ' (1:' + str.tostring(quickRR2, '#.#') + ')\n' + '⚡ Zone Reaction'
+    // TP labels
+    currentSetup.tp1Tag := label.new(bar_index + 1, tp1Price, 'TP1', xloc=xloc.bar_index, style=label.style_label_left, color=color.new(color.green, 70), textcolor=color.black, size=size.tiny)
+    currentSetup.tp2Tag := label.new(bar_index + 1, tp2Price, 'TP2', xloc=xloc.bar_index, style=label.style_label_left, color=color.new(color.green, 60), textcolor=color.black, size=size.tiny)
+    currentSetup.tp3Tag := na
+    
+    // Draw label (full precision)
+    labelText = '⚡ QUICK BUY\n━━━━━━━━━━\n' + '📍 Entry: ' + str.tostring(entryPrice) + '\n' + '❌ SL: ' + str.tostring(slPrice) + '\n' + '✅ TP1: ' + str.tostring(tp1Price) + ' (1:' + str.tostring(quickRR1) + ')\n' + '✅ TP2: ' + str.tostring(tp2Price) + ' (1:' + str.tostring(quickRR2) + ')\n⚡ Zone Reaction'
     currentSetup.setupLabel := label.new(bar_index, low, labelText, style=label.style_label_up, color=quickColor, textcolor=color.black, size=size.normal)
     
     totalSetups += 1
@@ -777,17 +861,28 @@ if quickSellSetup
     currentSetup.active := true
     currentSetup.isQuick := true
     currentSetup.setupType := '⚡ QUICK'
+    currentSetup.movedToBE := false
     
-    // Draw lines (yellow/orange for quick)
+    // Draw projection-style visuals (yellow theme)
     quickColor = color.new(color.yellow, 0)
-    currentSetup.entryLine := line.new(bar_index, entryPrice, bar_index + 30, entryPrice, xloc=xloc.bar_index, color=quickColor, width=2, style=line.style_solid)
-    currentSetup.slLine := line.new(bar_index, slPrice, bar_index + 30, slPrice, xloc=xloc.bar_index, color=bearColor, width=2, style=line.style_dashed)
-    currentSetup.tp1Line := line.new(bar_index, tp1Price, bar_index + 30, tp1Price, xloc=xloc.bar_index, color=bullColor, width=1, style=line.style_dashed)
-    currentSetup.tp2Line := line.new(bar_index, tp2Price, bar_index + 30, tp2Price, xloc=xloc.bar_index, color=bullColor, width=2, style=line.style_dashed)
+    projWidthQ = 30
+    currentSetup.entryLine := line.new(bar_index, entryPrice, bar_index + projWidthQ, entryPrice, xloc=xloc.bar_index, color=quickColor, width=2, style=line.style_solid)
+    currentSetup.slLine := line.new(bar_index, slPrice, bar_index + projWidthQ, slPrice, xloc=xloc.bar_index, color=bearColor, width=2, style=line.style_dashed)
+    currentSetup.tp1Line := line.new(bar_index, tp1Price, bar_index + projWidthQ, tp1Price, xloc=xloc.bar_index, color=bullColor, width=1, style=line.style_dashed)
+    currentSetup.tp2Line := line.new(bar_index, tp2Price, bar_index + projWidthQ, tp2Price, xloc=xloc.bar_index, color=bullColor, width=2, style=line.style_dashed)
     currentSetup.tp3Line := na
+    currentSetup.riskBox := box.new(bar_index, slPrice, bar_index + projWidthQ, entryPrice, xloc=xloc.bar_index, bgcolor=color.new(color.orange, 85), border_color=color.new(color.orange, 60))
+    currentSetup.rewardBox1 := box.new(bar_index, entryPrice, bar_index + projWidthQ, tp1Price, xloc=xloc.bar_index, bgcolor=color.new(color.green, 90), border_color=color.new(color.green, 70))
+    currentSetup.rewardBox2 := box.new(bar_index, entryPrice, bar_index + projWidthQ, tp2Price, xloc=xloc.bar_index, bgcolor=color.new(color.green, 92), border_color=color.new(color.green, 80))
+    currentSetup.rewardBox3 := na
     
-    // Draw label
-    labelText = '⚡ QUICK SELL\n━━━━━━━━━━\n' + '📍 Entry: ' + str.tostring(entryPrice, '#.##') + '\n' + '❌ SL: ' + str.tostring(slPrice, '#.##') + '\n' + '✅ TP1: ' + str.tostring(tp1Price, '#.##') + ' (1:' + str.tostring(quickRR1, '#.#') + ')\n' + '✅ TP2: ' + str.tostring(tp2Price, '#.##') + ' (1:' + str.tostring(quickRR2, '#.#') + ')\n' + '⚡ Zone Reaction'
+    // TP labels
+    currentSetup.tp1Tag := label.new(bar_index + 1, tp1Price, 'TP1', xloc=xloc.bar_index, style=label.style_label_left, color=color.new(color.green, 70), textcolor=color.black, size=size.tiny)
+    currentSetup.tp2Tag := label.new(bar_index + 1, tp2Price, 'TP2', xloc=xloc.bar_index, style=label.style_label_left, color=color.new(color.green, 60), textcolor=color.black, size=size.tiny)
+    currentSetup.tp3Tag := na
+    
+    // Draw label (full precision)
+    labelText = '⚡ QUICK SELL\n━━━━━━━━━━\n' + '📍 Entry: ' + str.tostring(entryPrice) + '\n' + '❌ SL: ' + str.tostring(slPrice) + '\n' + '✅ TP1: ' + str.tostring(tp1Price) + ' (1:' + str.tostring(quickRR1) + ')\n' + '✅ TP2: ' + str.tostring(tp2Price) + ' (1:' + str.tostring(quickRR2) + ')\n⚡ Zone Reaction'
     currentSetup.setupLabel := label.new(bar_index, high, labelText, style=label.style_label_down, color=quickColor, textcolor=color.black, size=size.normal)
     
     totalSetups += 1
@@ -801,6 +896,49 @@ moveToBE = false
 tradeCompleted = false
 
 if not na(currentSetup)
+    // keep boxes extending
+    projWidthDyn = currentSetup.isQuick ? 30 : 50
+    // Update projection visuals to current bar width
+    if not na(currentSetup.riskBox)
+        box.set_right(currentSetup.riskBox, bar_index + projWidthDyn)
+    if not na(currentSetup.rewardBox1)
+        box.set_right(currentSetup.rewardBox1, bar_index + projWidthDyn)
+    if not na(currentSetup.rewardBox2)
+        box.set_right(currentSetup.rewardBox2, bar_index + projWidthDyn)
+    if not na(currentSetup.rewardBox3)
+        box.set_right(currentSetup.rewardBox3, bar_index + projWidthDyn)
+    if not na(currentSetup.entryLine)
+        line.set_x2(currentSetup.entryLine, bar_index + projWidthDyn)
+    if not na(currentSetup.slLine)
+        line.set_x2(currentSetup.slLine, bar_index + projWidthDyn)
+    if not na(currentSetup.tp1Line)
+        line.set_x2(currentSetup.tp1Line, bar_index + projWidthDyn)
+    if not na(currentSetup.tp2Line)
+        line.set_x2(currentSetup.tp2Line, bar_index + projWidthDyn)
+    if not na(currentSetup.tp3Line)
+        line.set_x2(currentSetup.tp3Line, bar_index + projWidthDyn)
+    // Update live progress box to current bar and price, clipped to TP/SL
+    if not na(currentSetup.progressBox)
+        box.set_right(currentSetup.progressBox, bar_index)
+        if currentSetup.isBullish
+            tpCap = not na(currentSetup.tp3) ? currentSetup.tp3 : currentSetup.tp2
+            topRaw = math.max(currentSetup.entry, close)
+            botRaw = math.min(currentSetup.entry, close)
+            topClamped = math.min(topRaw, tpCap)
+            botClamped = math.max(botRaw, currentSetup.sl)
+            box.set_top(currentSetup.progressBox, topClamped)
+            box.set_bottom(currentSetup.progressBox, botClamped)
+            box.set_bgcolor(currentSetup.progressBox, close >= currentSetup.entry ? color.new(color.green, 80) : color.new(color.red, 80))
+        else
+            tpCapS = not na(currentSetup.tp3) ? currentSetup.tp3 : currentSetup.tp2
+            topRawS = math.max(currentSetup.entry, close)
+            botRawS = math.min(currentSetup.entry, close)
+            topClampedS = math.min(topRawS, currentSetup.sl)
+            botClampedS = math.max(botRawS, tpCapS)
+            box.set_top(currentSetup.progressBox, topClampedS)
+            box.set_bottom(currentSetup.progressBox, botClampedS)
+            box.set_bgcolor(currentSetup.progressBox, close <= currentSetup.entry ? color.new(color.green, 80) : color.new(color.red, 80))
+
     if currentSetup.active
         if currentSetup.isBullish
             // Check if TP2 hit (full win) or SL hit (loss) - close trade
@@ -810,15 +948,12 @@ if not na(currentSetup)
                 currentSetup.active := false
                 tradeCompleted := true
                 winRate := (wonSetups / totalSetups) * 100
-            // Check if TP1 hit (partial win) - keep active but count as win
-            else if high >= currentSetup.tp1 and not currentSetup.isQuick
-                wonSetups += 1
-                // Keep active for TP2
-            // Check if should move to BE
-            else
-                riskPips = currentSetup.entry - currentSetup.sl
-                if high >= currentSetup.entry + (riskPips * beLevel)
-                    moveToBE := true
+            // TP1 hit: partial win (for sniper), move to BE for all
+            else if high >= currentSetup.tp1
+                if not currentSetup.isQuick
+                    wonSetups += 1
+                moveToBE := true
+                // keep active for TP2
         else
             // Check if TP2 hit (full win) or SL hit (loss) - close trade
             if low <= currentSetup.tp2 or high >= currentSetup.sl
@@ -827,18 +962,52 @@ if not na(currentSetup)
                 currentSetup.active := false
                 tradeCompleted := true
                 winRate := (wonSetups / totalSetups) * 100
-            // Check if TP1 hit (partial win) - keep active but count as win
-            else if low <= currentSetup.tp1 and not currentSetup.isQuick
-                wonSetups += 1
-                // Keep active for TP2
-            // Check if should move to BE
-            else
-                riskPips = currentSetup.sl - currentSetup.entry
-                if low <= currentSetup.entry - (riskPips * beLevel)
-                    moveToBE := true
+            // TP1 hit: partial win (for sniper), move to BE for all
+            else if low <= currentSetup.tp1
+                if not currentSetup.isQuick
+                    wonSetups += 1
+                moveToBE := true
+                // keep active for TP2
+    
+    // Auto move SL to BE once condition triggered (both sides)
+    if moveToBE and not currentSetup.movedToBE
+        currentSetup.sl := currentSetup.entry
+        currentSetup.movedToBE := true
+        if not na(currentSetup.slLine)
+            line.set_y1(currentSetup.slLine, currentSetup.sl)
+            line.set_y2(currentSetup.slLine, currentSetup.sl)
 
 // Reset currentSetup when trade is completed so new setups can trigger
 if tradeCompleted
+    // Clean up visuals before clearing
+    if not na(currentSetup.entryLine)
+        line.delete(currentSetup.entryLine)
+    if not na(currentSetup.slLine)
+        line.delete(currentSetup.slLine)
+    if not na(currentSetup.tp1Line)
+        line.delete(currentSetup.tp1Line)
+    if not na(currentSetup.tp2Line)
+        line.delete(currentSetup.tp2Line)
+    if not na(currentSetup.tp3Line)
+        line.delete(currentSetup.tp3Line)
+    if not na(currentSetup.setupLabel)
+        label.delete(currentSetup.setupLabel)
+    if not na(currentSetup.riskBox)
+        box.delete(currentSetup.riskBox)
+    if not na(currentSetup.rewardBox1)
+        box.delete(currentSetup.rewardBox1)
+    if not na(currentSetup.rewardBox2)
+        box.delete(currentSetup.rewardBox2)
+    if not na(currentSetup.rewardBox3)
+        box.delete(currentSetup.rewardBox3)
+    if not na(currentSetup.progressBox)
+        box.delete(currentSetup.progressBox)
+    if not na(currentSetup.tp1Tag)
+        label.delete(currentSetup.tp1Tag)
+    if not na(currentSetup.tp2Tag)
+        label.delete(currentSetup.tp2Tag)
+    if not na(currentSetup.tp3Tag)
+        label.delete(currentSetup.tp3Tag)
     currentSetup := na
 
 // ═════════════════════════════════════════════════════════════════════════════
